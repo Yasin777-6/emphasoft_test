@@ -42,8 +42,6 @@ class BookingCreateSerializer(serializers.ModelSerializer):
         if start_date > end_date:
             raise serializers.ValidationError('The start date cannot be after the end date.')
         
-        # Check for overlapping bookings
-        # Overlap formula: (StartA <= EndB) and (EndA >= StartB)
         overlapping_bookings = Booking.objects.filter(
             room=room,
             is_canceled=False,
