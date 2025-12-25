@@ -1,7 +1,7 @@
  Hotel Booking API
 
 Hey! This is my test task for the Junior Backend Developer (Python) position. It's a simple API for booking hotel rooms, built with Django and DRF.
-
+The PostreSQL server's password and etc are prebuild in project i was not hiding it in .env for comfort of dear developers from Emphasoft that would be checking my project.
 Tech Stack
 *   Python 3.12
 *   Django & DRF
@@ -11,7 +11,7 @@ How to Run It
 
 1.  Clone the repo:
     ```bash
-    git clone <repository_url>
+    
     cd BookingApp
     ```
 
