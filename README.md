@@ -64,6 +64,8 @@ Features Implemented
    Rooms: You can view all rooms and filter them by capacity or price.
    Booking: Registered users can book rooms. I added validation so you can't double-book a room or pick invalid dates.
    Search: Check which rooms are free for specific dates.
-    Auth: Standard registration and JWT token authentication.
+    Auth: Standard registration and JWT token authentication
 
-Let me know if you have any questions!
+
+Also i used Atomic and select for update to prevent errors and false booking
+also used select related to prevent n+1 query problem

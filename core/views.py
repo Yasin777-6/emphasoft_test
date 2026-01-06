@@ -1,97 +1,149 @@
-from django.shortcuts import render
-from rest_framework import generics, permissions,status,viewsets
-from .serializers import RegisterSerializer,RoomSerializer,BookingReadSerializer,BookingCreateSerializer
-from .models import Room,Booking
-from rest_framework.views import APIView
-from rest_framework.response import Response
-from datetime import date
+from django.db import transaction
+from django.db.models import QuerySet
 from django.shortcuts import get_object_or_404
 
+from rest_framework import generics, permissions, status, viewsets
+from rest_framework.exceptions import ValidationError
+from rest_framework.response import Response
+from rest_framework.views import APIView
 
+from drf_spectacular.utils import extend_schema
+
+from .models import Room, Booking
+from .serializers import (
+    RegisterSerializer,
+    RoomSerializer,
+    BookingReadSerializer,
+    BookingCreateSerializer,
+    AvailableRoomsQuerySerializer,
+)
+
+
+@extend_schema(tags=["auth"])
 class RegisterView(generics.CreateAPIView):
     serializer_class = RegisterSerializer
-    permission_classes=[permissions.AllowAny]
+    permission_classes = [permissions.AllowAny]
+
+
+@extend_schema(tags=["rooms"])
 class RoomViewSet(viewsets.ReadOnlyModelViewSet):
-    serializer_class=RoomSerializer
-    def get_queryset(self):
+    serializer_class = RoomSerializer
+
+    def get_queryset(self) -> QuerySet[Room]:
         qs = Room.objects.all()
         capacity = self.request.query_params.get("capacity")
         min_price = self.request.query_params.get("min_price")
         ordering = self.request.query_params.get("ordering")
 
         if capacity:
-            qs = qs.filter(capacity=int(capacity))
+            try:
+                qs = qs.filter(capacity=int(capacity))
+            except ValueError:
+                pass
 
         if min_price:
-            qs = qs.filter(cost_per_day__gte=min_price)
+            try:
+                qs = qs.filter(cost_per_day__gte=min_price)  
+            except ValueError:
+                pass
 
         if ordering in ["cost_per_day", "-cost_per_day", "capacity", "-capacity"]:
             qs = qs.order_by(ordering)
 
         return qs
 
+
+@extend_schema(tags=["bookings"])
 class BookingCreateView(generics.CreateAPIView):
-    permission_classes=[permissions.IsAuthenticated] 
+    permission_classes = [permissions.IsAuthenticated]
     serializer_class = BookingCreateSerializer
-    
-    def perform_create(self,serializer):
+
+    @transaction.atomic
+    def perform_create(self, serializer: BookingCreateSerializer) -> None:
+        room = serializer.validated_data["room"]
+        start_date = serializer.validated_data["start_date"]
+        end_date = serializer.validated_data["end_date"]
+
+        # Lock the room 
+        Room.objects.select_for_update().get(pk=room.pk)
+
+        
+        conflict_exists = Booking.objects.filter(
+            room=room,
+            is_canceled=False,
+            start_date__lte=end_date,
+            end_date__gte=start_date,
+        ).exists()
+
+        if conflict_exists:
+            raise ValidationError("Room is already booked.")
+
         serializer.save(user=self.request.user)
 
 
+@extend_schema(tags=["bookings"])
 class BookingMyListView(generics.ListAPIView):
     serializer_class = BookingReadSerializer
-    permission_classes=[permissions.IsAuthenticated]
-    def get_queryset(self):
-        return Booking.objects.filter(user=self.request.user)
+    permission_classes = [permissions.IsAuthenticated]
 
-        
+    def get_queryset(self) -> QuerySet[Booking]:
+        # ✅ IMPORTANT: call select_related("room") (don't return the method!)
+        return (
+            Booking.objects
+            .filter(user=self.request.user)
+            .select_related("room")     # fixes N+1 (serializer uses room.name)
+            .order_by("-create_at")
+        )
+
+
+@extend_schema(tags=["bookings"])
 class CancelApiView(APIView):
-    permission_classes=[permissions.IsAuthenticated]
-    def post(self,request,pk):
-        booking = get_object_or_404(Booking,pk=pk)
-        qr=Booking.objects.filter(user=booking.user,pk=pk)
-        if booking.user ==request.user:
-            qr.update(is_canceled=True)
-        return Response({'status':'canceled'})
+    permission_classes = [permissions.IsAuthenticated]
+
+    @transaction.atomic
+    def post(self, request, pk: int) -> Response:
+        qs = Booking.objects.select_for_update()
+
+        if request.user.is_superuser:
+            booking = get_object_or_404(qs, pk=pk)
+        else:
+            booking = get_object_or_404(qs, pk=pk, user=request.user)
+
+        if booking.is_canceled:
+            return Response(
+                {"detail": "Booking is already canceled пэпэ."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        booking.is_canceled = True
+        booking.save(update_fields=["is_canceled"])
+
+        return Response({"status": "canceled"}, status=status.HTTP_200_OK)
 
 
-
+@extend_schema(
+    tags=["rooms"],
+    parameters=[AvailableRoomsQuerySerializer],
+    responses={200: RoomSerializer(many=True)},
+)
 class AvailableRoomsView(APIView):
     permission_classes = [permissions.AllowAny]
 
-    def get(self, request):
-        start_str = request.query_params.get("start_date")
-        end_str = request.query_params.get("end_date")
+    def get(self, request) -> Response:
+        serializer = AvailableRoomsQuerySerializer(data=request.query_params)
+        serializer.is_valid(raise_exception=True)
 
-        if not start_str or not end_str:
-            return Response(
-                {"error": "start_date and end_date are required "},
-                status=status.HTTP_400_BAD_REQUEST,
+        start_date = serializer.validated_data["start_date"]
+        end_date = serializer.validated_data["end_date"]
+
+        # Exclude rooms 
+        available_rooms = (
+            Room.objects.exclude(
+                bookings__is_canceled=False,
+                bookings__start_date__lte=end_date,
+                bookings__end_date__gte=start_date,
             )
-
-        try:
-            start_date = date.fromisoformat(start_str)
-            end_date = date.fromisoformat(end_str)
-        except ValueError:
-            return Response(
-                {"error": "Invalid date format."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        
-        if start_date > end_date:
-            return Response(
-                {"error": "start_date cannot be after end_date mann"},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        
-
-        available_rooms = Room.objects.exclude(
-            bookings__is_canceled=False,
-            bookings__start_date__lte=end_date,
-            bookings__end_date__gte=start_date,
+            .distinct()  # avoid duplicate
         )
 
-        return Response(RoomSerializer(available_rooms, many=True).data)
-
+        return Response(RoomSerializer(available_rooms, many=True).data, status=status.HTTP_200_OK)
